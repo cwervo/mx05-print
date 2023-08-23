@@ -101,8 +101,7 @@ feed_lines = 112
 header_lines = 0
 scale_feed = False
 
-# packet_length = 60
-packet_length = 60 * 3
+packet_length = 60 
 throttle = 0.01
 
 address = None
@@ -147,8 +146,7 @@ def notification_handler(sender, data):
 
 
 async def connect_and_send(data):
-    scanner = BleakScanner()
-    scanner.register_detection_callback(detect_printer)
+    scanner = BleakScanner(detection_callback=detect_printer)
     await scanner.start()
     for x in range(200):
         await asyncio.sleep(0.1)
@@ -173,6 +171,27 @@ async def connect_and_send(data):
 def request_status():
     return format_message(GetDevState, [0x00])
 
+def to_unsigned_byte(val):
+    '''Converts a byte in signed representation to unsigned. Assumes val is encoded in two's
+    complement.'''
+    return val if val >= 0 else val & 0xff
+
+def bs(lst):
+    '''This is an utility function that transforms a list of unsigned bytes (in two's complement)
+    into an unsigned bytearray.
+
+    The reason it exists is that in Java (where these commands were reverse engineered from), bytes
+    are signed. Instead of manually converting them, let the computer do it for us, so it's easier
+    to debug and extend it with new reverse engineered commands.
+    '''
+    return bytearray(map(to_unsigned_byte, lst))
+
+
+CMD_GET_DEV_STATE = bs([
+    81, 120, -93, 0, 1, 0, 0, 0, -1
+])
+
+CMD_SET_QUALITY_200_DPI = bs([81, 120, -92, 0, 1, 0, 50, -98, -1])
 
 def blank_paper(lines):
     # Feed extra paper for image to be visible
@@ -218,11 +237,11 @@ def create_text(text, font_name="Everson Mono.ttf", font_size=30):
     d.text((0,0), lines, fill=(0,0,0), font=font)
     return trim(img)
 
-quality1 = [0x51, 0x78, 0xA4, 0x00, 0x01, 0x00, 0x31, 0x97, 0xFF]
+quality1 = [0x51, 0x78, 0xA4, 0x00, 0x01, 0x00, 0x32, 0x9e, 0xFF]
 quality5 = [0x51, 0x78, 0xA4, 0x00, 0x01, 0x00, 0x35, 0x8B, 0xFF]
 printImage = [0x51, 0x78, 0xbe, 0x0, 0x1, 0x0, 0x0, 0x0, 0xff]
 printEnergy = [0x51, 0x78, 0xAF, 0x00, 0x02, 0x00, 0x28, 0x23, 0xEF, 0xFF]
-printSpeed = [0x51, 0x78, 0xbd, 0x00, 0x01, 0x14, 0x6c, 0xff]
+printSpeed = [0x51, 0x78, 0xbd, 0x00, 0x01, 0x00, 25 & 0xff, 0, 0xff]
 
 def render_image(img):
     global header_lines
