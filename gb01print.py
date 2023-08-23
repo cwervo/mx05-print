@@ -6,6 +6,9 @@ from bleak import BleakClient, BleakScanner
 from bleak.exc import BleakError
 
 import PIL.Image
+import PIL.ImageFont
+import PIL.ImageDraw
+import PIL.ImageChops
 
 # CRC8 table extracted from APK, pretty standard though
 crc8_table = (
@@ -71,29 +74,35 @@ OtherFeedPaper = 0xBD  # Data: one byte, set to a device-specific "Speed" value 
 DrawingMode = 0xBE  # Data: 1 for Text, 0 for Images
 SetEnergy = 0xAF  # Data: 1 - 0xFFFF
 SetQuality = 0xA4  # Data: 0x31 - 0x35. APK always sets 0x33 for GB01
+UpdateDevice = 0xA9 
 
 PrintLattice = [0xAA, 0x55, 0x17, 0x38, 0x44, 0x5F, 0x5F, 0x5F, 0x44, 0x38, 0x2C]
 FinishLattice = [0xAA, 0x55, 0x17, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x17]
 XOff = (0x51, 0x78, 0xAE, 0x01, 0x01, 0x00, 0x10, 0x70, 0xFF)
 XOn = (0x51, 0x78, 0xAE, 0x01, 0x01, 0x00, 0x00, 0x00, 0xFF)
 
+max_energy = 0xFFFF
+max_energy_bytes = [ max_energy.to_bytes(2, 'little')[0], max_energy.to_bytes(2, 'little')[1]]
+
 energy = {
     0: printer_short(8000),
     1: printer_short(12000),
-    2: printer_short(17500)
+    # 2: printer_short(17500)
+    2: max_energy_bytes
 }
-contrast = 1
+contrast = 2
 
 PrinterWidth = 384
 
-ImgPrintSpeed = [0x23]
+ImgPrintSpeed = [0x01]
 BlankSpeed = [0x19]
 
 feed_lines = 112
 header_lines = 0
 scale_feed = False
 
-packet_length = 60
+# packet_length = 60
+packet_length = 60 * 3
 throttle = 0.01
 
 address = None
@@ -107,11 +116,12 @@ debug = False
 
 def detect_printer(detected, advertisement_data):
     global device
+    print(detected.name)
     if address:
         cut_addr = detected.address.replace(":", "")[-(len(address)):].upper()
         if cut_addr != address:
             return
-    if detected.name == 'GB01':
+    if detected.name == 'MX06':
         device = detected
 
 
@@ -140,7 +150,7 @@ async def connect_and_send(data):
     scanner = BleakScanner()
     scanner.register_detection_callback(detect_printer)
     await scanner.start()
-    for x in range(50):
+    for x in range(200):
         await asyncio.sleep(0.1)
         if device:
             break
@@ -174,24 +184,75 @@ def blank_paper(lines):
         count = count - feed
     return blank_commands
 
+def get_wrapped_text(text: str, font: PIL.ImageFont.ImageFont,
+                     line_length: int):
+    if font.getlength(text) <= line_length:
+        return text
+
+    lines = ['']
+    for word in text.split():
+        line = f'{lines[-1]} {word}'.strip()
+        if font.getlength(line) <= line_length:
+            lines[-1] = line
+        else:
+            lines.append(word)
+    return '\n'.join(lines)
+
+def trim(im):
+    bg = PIL.Image.new(im.mode, im.size, (255,255,255))
+    diff = PIL.ImageChops.difference(im, bg)
+    diff = PIL.ImageChops.add(diff, diff, 2.0)
+    bbox = diff.getbbox()
+    if bbox:
+        return im.crop((bbox[0],bbox[1],bbox[2],bbox[3]+10)) # don't cut off the end of the image
+
+def create_text(text, font_name="Everson Mono.ttf", font_size=30):
+    img = PIL.Image.new('RGB', (PrinterWidth, 5000), color = (255, 255, 255))
+    font = PIL.ImageFont.truetype(font_name, font_size)
+    
+    d = PIL.ImageDraw.Draw(img)
+    lines = []
+    for line in text.splitlines():
+        lines.append(get_wrapped_text(line, font, PrinterWidth))
+    lines = "\n".join(lines)
+    d.text((0,0), lines, fill=(0,0,0), font=font)
+    return trim(img)
+
+quality1 = [0x51, 0x78, 0xA4, 0x00, 0x01, 0x00, 0x31, 0x97, 0xFF]
+quality5 = [0x51, 0x78, 0xA4, 0x00, 0x01, 0x00, 0x35, 0x8B, 0xFF]
+printImage = [0x51, 0x78, 0xbe, 0x0, 0x1, 0x0, 0x0, 0x0, 0xff]
+printEnergy = [0x51, 0x78, 0xAF, 0x00, 0x02, 0x00, 0x28, 0x23, 0xEF, 0xFF]
+printSpeed = [0x51, 0x78, 0xbd, 0x00, 0x01, 0x14, 0x6c, 0xff]
 
 def render_image(img):
     global header_lines
     global feed_lines
 
     cmdqueue = []
-    # Set quality to standard
-    cmdqueue += format_message(SetQuality, [0x33])
-    # start and/or set up the lattice, whatever that is
-    cmdqueue += format_message(ControlLattice, PrintLattice)
-    # Set energy used
-    cmdqueue += format_message(SetEnergy, energy[contrast])
-    # Set mode to image mode
+    cmdqueue += quality5
+    # energy
+    cmdqueue += printEnergy
+    # cmdqueue += format_message(SetEnergy, [0xff, 0xff])
+    # cmdqueue += format_message(SetEnergy, printer_short(20000))
+    # cmdqueue += format_message(UpdateDevice, [0])
     cmdqueue += format_message(DrawingMode, [0])
-    # not entirely sure what this does
-    cmdqueue += format_message(OtherFeedPaper, ImgPrintSpeed)
+    # cmdqueue += format_message(OtherFeedPaper, [80])
+    cmdqueue += printSpeed
+
+    # print model
+    # cmdqueue += printImage
+    # print speed
+
+    # Set quality to standard
+    #  quality 5 = {81, 120, -92, 0, 1, 0, 53, -117, -1}
+    
+    # speed
+    # Set energy used
+    # Set mode to image mode / apply energy?
+    cmdqueue += format_message(ControlLattice, PrintLattice)
 
     if img.width > PrinterWidth:
+        print("larger")
         # image is wider than printer resolution; scale it down proportionately
         scale = PrinterWidth / img.width
         if scale_feed:
@@ -199,6 +260,7 @@ def render_image(img):
             feed_lines = int(feed_lines * scale)
         img = img.resize((PrinterWidth, int(img.height * scale)))
     if img.width < (PrinterWidth // 2):
+        print("smaller")
         # scale up to largest whole multiple
         scale = PrinterWidth // img.width
         if scale_feed:
@@ -206,7 +268,7 @@ def render_image(img):
             feed_lines = int(feed_lines * scale)
         img = img.resize((img.width * scale, img.height * scale), resample=PIL.Image.NEAREST)
     # convert image to black-and-white 1bpp color format
-    img = img.convert("RGB")
+    # img = img.convert("RGB")
     img = img.convert("1")
     if img.width < PrinterWidth:
         # image is narrower than printer resolution
@@ -236,6 +298,8 @@ def render_image(img):
 
         cmdqueue += format_message(DrawBitmap, bmp)
 
+    # print speed
+    # dpi
     # finish the lattice, whatever that means
     cmdqueue += format_message(ControlLattice, FinishLattice)
 
@@ -273,6 +337,10 @@ contrast_args.add_argument("-d", "--dark",
                            action="store_const", dest="contrast", const=2)
 parser.add_argument("-A", "--address",
                     help="MAC address of printer in hex (rightmost digits, colons optional)")
+parser.add_argument("--text",
+                    help="text to print")
+parser.add_argument("--text-size",
+                    help="size to print")
 parser.add_argument("-D", "--debug",
                     help="output notifications received from printer, in hex",
                     action="store_true")
@@ -290,6 +358,8 @@ if args.contrast:
     contrast = args.contrast
 if args.address:
     address = args.address.replace(':', '').upper()
+if args.text:
+    text_to_print = args.text
 throttle = args.throttle
 packet_length = args.packetsize
 feed_lines = args.feed
@@ -298,8 +368,11 @@ if args.scale_feed:
     scale_feed = True
 
 print_data = request_status()
-if not args.eject:
+if not args.eject and not args.text:
     image = PIL.Image.open(args.filename)
+    print_data = print_data + render_image(image)
+if args.text:
+    image = create_text(text_to_print)
     print_data = print_data + render_image(image)
 if not args.no_eject:
     print_data = print_data + blank_paper(feed_lines)
