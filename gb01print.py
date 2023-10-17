@@ -120,7 +120,11 @@ def detect_printer(detected, advertisement_data):
         cut_addr = detected.address.replace(":", "")[-(len(address)):].upper()
         if cut_addr != address:
             return
-    if detected.name == 'MX06':
+    # VRK's:
+    # if detected.name == 'MX06':
+    # GB01's:
+    if detected.name == 'MX05':
+        print("found printer!")
         device = detected
 
 
